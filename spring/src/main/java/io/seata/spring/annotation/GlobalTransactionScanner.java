@@ -16,10 +16,13 @@
 package io.seata.spring.annotation;
 
 import javax.sql.DataSource;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.HashSet;
 import java.util.Set;
 
+import io.seata.common.exception.ShouldNeverHappenException;
 import io.seata.common.util.StringUtils;
 import io.seata.config.ConfigurationFactory;
 import io.seata.core.rpc.netty.RmRpcClient;
@@ -46,8 +49,6 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.beans.factory.config.BeanPostProcessor;
-import org.springframework.cglib.proxy.Enhancer;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -62,7 +63,7 @@ import static io.seata.core.constants.ConfigurationKeys.DATASOURCE_AUTOPROXY;
  */
 public class GlobalTransactionScanner extends AbstractAutoProxyCreator
     implements InitializingBean, ApplicationContextAware,
-    DisposableBean, BeanPostProcessor {
+    DisposableBean {
 
     /**
      *
@@ -218,7 +219,7 @@ public class GlobalTransactionScanner extends AbstractAutoProxyCreator
                 interceptor = null;
                 //check TCC proxy
                 if (TCCBeanParserUtils.isTccAutoProxy(bean, beanName, applicationContext)) {
-                    //TCC interceptor， proxy bean of sofa:reference/dubbo:reference, and LocalTCC
+                    //TCC interceptor, proxy bean of sofa:reference/dubbo:reference, and LocalTCC
                     interceptor = new TccActionInterceptor(TCCBeanParserUtils.getRemotingDesc(beanName));
                 } else {
                     Class<?> serviceInterface = SpringProxyUtils.findTargetClass(bean);
@@ -306,21 +307,41 @@ public class GlobalTransactionScanner extends AbstractAutoProxyCreator
     }
 
     @Override
-    public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+    public Object postProcessBeforeInitialization(Object bean, String beanName) {
+        if (bean instanceof DataSourceProxy && ConfigurationFactory.getInstance().getBoolean(DATASOURCE_AUTOPROXY, false)) {
+            throw new ShouldNeverHappenException("Auto proxy of DataSource can't be enabled as you've created a DataSourceProxy bean." +
+                "Please consider removing DataSourceProxy bean or disabling auto proxy of DataSource.");
+        }
+        return super.postProcessBeforeInitialization(bean, beanName);
+    }
+
+    @Override
+    public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
         if (bean instanceof DataSource && !(bean instanceof DataSourceProxy) && ConfigurationFactory.getInstance().getBoolean(DATASOURCE_AUTOPROXY, false)) {
             if (LOGGER.isInfoEnabled()) {
-                LOGGER.info("Auto proxy of  [" + beanName + "]");
+                LOGGER.info("Auto proxy of [{}]", beanName);
             }
             DataSourceProxy dataSourceProxy = DataSourceProxyHolder.get().putDataSource((DataSource) bean);
-            return Enhancer.create(bean.getClass(), (org.springframework.cglib.proxy.MethodInterceptor) (o, method, args, methodProxy) -> {
-                Method m = BeanUtils.findDeclaredMethod(DataSourceProxy.class, method.getName(), method.getParameterTypes());
-                if (null != m) {
-                    return m.invoke(dataSourceProxy, args);
-                } else {
-                    return method.invoke(bean, args);
+            return Proxy.newProxyInstance(Thread.currentThread().getContextClassLoader(), bean.getClass().getInterfaces(), new InvocationHandler() {
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                    Method m = BeanUtils.findDeclaredMethod(DataSourceProxy.class, method.getName(), method.getParameterTypes());
+                    if (null != m) {
+                        return m.invoke(dataSourceProxy, args);
+                    } else {
+                        boolean oldAccessible = method.isAccessible();
+                        try {
+                            method.setAccessible(true);
+                            return method.invoke(bean, args);
+                        } finally {
+                            //recover the original accessible for security reason
+                            method.setAccessible(oldAccessible);
+                        }
+                    }
                 }
             });
+
         }
-        return bean;
+        return super.postProcessAfterInitialization(bean, beanName);
     }
 }
