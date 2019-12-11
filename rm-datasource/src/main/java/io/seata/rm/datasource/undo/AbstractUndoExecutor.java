@@ -16,6 +16,7 @@
 package io.seata.rm.datasource.undo;
 
 import com.alibaba.fastjson.JSON;
+import io.seata.common.util.IOUtil;
 import io.seata.common.util.StringUtils;
 import io.seata.config.ConfigurationFactory;
 import io.seata.core.constants.ConfigurationKeys;
@@ -155,14 +156,23 @@ public abstract class AbstractUndoExecutor {
             undoIndex++;
             if (undoValue.getType() == JDBCType.BLOB.getVendorTypeNumber()) {
                 SerialBlob serialBlob = (SerialBlob) undoValue.getValue();
-                undoPST.setBlob(undoIndex, serialBlob.getBinaryStream());
+                if (serialBlob != null) {
+                    undoPST.setBlob(undoIndex, serialBlob.getBinaryStream());
+                } else {
+                    undoPST.setObject(undoIndex, null);
+                }
             } else if (undoValue.getType() == JDBCType.CLOB.getVendorTypeNumber()) {
                 SerialClob serialClob = (SerialClob) undoValue.getValue();
-                undoPST.setClob(undoIndex, serialClob.getCharacterStream());
+                if (serialClob != null) {
+                    undoPST.setClob(undoIndex, serialClob.getCharacterStream());
+                } else {
+                    undoPST.setObject(undoIndex, null);
+                }
+            } else if (undoValue.getType() == JDBCType.OTHER.getVendorTypeNumber()) {
+                undoPST.setObject(undoIndex, undoValue.getValue());
             } else {
                 undoPST.setObject(undoIndex, undoValue.getValue(), undoValue.getType());
             }
-
         }
         // PK is at last one.
         // INSERT INTO a (x, y, z, pk) VALUES (?, ?, ?, ?)
@@ -255,7 +265,7 @@ public abstract class AbstractUndoExecutor {
         if (pkValues.length == 0) {
             return TableRecords.empty(tableMeta);
         }
-        StringBuffer replace = new StringBuffer();
+        StringBuilder replace = new StringBuilder();
         for (int i = 0; i < pkValues.length; i++) {
             replace.append("?,");
         }
@@ -274,18 +284,7 @@ public abstract class AbstractUndoExecutor {
             checkSet = statement.executeQuery();
             currentRecords = TableRecords.buildRecords(tableMeta, checkSet);
         } finally {
-            if (checkSet != null) {
-                try {
-                    checkSet.close();
-                } catch (Exception e) {
-                }
-            }
-            if (statement != null) {
-                try {
-                    statement.close();
-                } catch (Exception e) {
-                }
-            }
+            IOUtil.close(checkSet, statement);
         }
         return currentRecords;
     }
